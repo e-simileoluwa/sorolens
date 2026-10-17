@@ -20,7 +20,7 @@ import type { BatchContractsAction } from "@/lib/types";
 import { networkFilter, useNetwork } from "@/lib/network";
 import { contractRowKey, isPendingRow } from "@/lib/optimisticTrack";
 import type { ContractRow } from "@/lib/optimisticTrack";
-import { getUserId } from "@/lib/user";
+import { useSessionUserId } from "@/lib/useSession";
 import { TableSkeleton } from "@/components/Skeleton";
 import ImportContractsCsv from "@/components/ImportContractsCsv";
 
@@ -400,6 +400,8 @@ export default function ContractsPage() {
 function ContractsPageInner() {
   // Selected network from the header selector.
   const { network } = useNetwork();
+  // Verified session user, minted on first use (issue #518).
+  const userId = useSessionUserId();
 
   // Sort state is derived from the URL and written back on change, so a
   // sorted view is shareable via its query string (#175).
@@ -616,7 +618,7 @@ function ContractsPageInner() {
     try {
       const res = await batchContracts(
         { ids, action, args: label ? { label } : undefined },
-        getUserId()
+        userId
       );
       const noun = res.affected === 1 ? "contract" : "contracts";
       setToast({
@@ -729,7 +731,7 @@ function ContractsPageInner() {
       {showImport && (
         <ImportContractsCsv
           network={network}
-          userId={getUserId()}
+          userId={userId}
           onClose={() => setShowImport(false)}
           onImported={handleTrackSuccess}
         />

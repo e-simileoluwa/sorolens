@@ -17,12 +17,14 @@ import {
 import type {
   ContractDetail,
   ContractEvent,
+  ContractStats,
   StorageEntry,
-  StatsResponse,
+  VolumePoint,
   ResourceTrendPoint,
   TimeWindow,
 } from "@/lib/types";
-import { getUserId } from "@/lib/user";
+import { getActivitySeries } from "@/lib/activitySeries";
+import { ensureSession } from "@/lib/user";
 import { StatCard } from "@/components/StatCard";
 import { TagInput } from "@/components/TagInput";
 import {
@@ -66,8 +68,10 @@ function ContractDetailContent({ id }: { id: string }) {
   const [tagSaving, setTagSaving] = useState(false);
 
   const [window, setWindow] = useState<TimeWindow>("7d");
-  const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [statsLoading, setStatsLoading] = useState(true);
+  const [stats, setStats] = useState<ContractStats | null>(null);
+  const [eventSeries, setEventSeries] = useState<VolumePoint[]>([]);
+  const [invocationSeries, setInvocationSeries] = useState<VolumePoint[]>([]);
+  const [seriesLoading, setSeriesLoading] = useState(true);
 
   const [trend, setTrend] = useState<ResourceTrendPoint[]>([]);
   const [trendLoading, setTrendLoading] = useState(true);
@@ -82,7 +86,6 @@ function ContractDetailContent({ id }: { id: string }) {
   const [storageLoading, setStorageLoading] = useState(true);
   const [storageCursor, setStorageCursor] = useState<string | null>(null);
   const [storageHasMore, setStorageHasMore] = useState(false);
-  const [currentLedger, setCurrentLedger] = useState(0);
 
   const { isConnected: isStreamConnected } = useEventStream({
     contractId: id,
@@ -129,18 +132,44 @@ function ContractDetailContent({ id }: { id: string }) {
     let cancelled = false;
 
     async function loadStats() {
-      setStatsLoading(true);
       try {
-        const data = await getContractStats(id, window);
+        // The documented endpoint only aggregates 24h/7d/30d; "all" displays
+        // totals, so the window counts are simply not shown for it.
+        const data = await getContractStats(
+          id,
+          window === "all" ? "24h" : window
+        );
         if (!cancelled) setStats(data);
       } catch {
         // stats are non-critical
-      } finally {
-        if (!cancelled) setStatsLoading(false);
       }
     }
 
     loadStats();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, window]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSeries() {
+      setSeriesLoading(true);
+      try {
+        const data = await getActivitySeries(id, window);
+        if (!cancelled) {
+          setEventSeries(data.events);
+          setInvocationSeries(data.invocations);
+        }
+      } catch {
+        // charts are non-critical
+      } finally {
+        if (!cancelled) setSeriesLoading(false);
+      }
+    }
+
+    loadSeries();
     return () => {
       cancelled = true;
     };
@@ -179,8 +208,8 @@ function ContractDetailContent({ id }: { id: string }) {
         });
         if (!cancelled) {
           setEvents(data.events);
-          setEventsCursor(data.cursor);
-          setEventsHasMore(data.has_more);
+          setEventsCursor(data.next_cursor || null);
+          setEventsHasMore(Boolean(data.next_cursor));
         }
       } catch {
         // non-critical
@@ -203,10 +232,9 @@ function ContractDetailContent({ id }: { id: string }) {
       try {
         const data = await getContractStorage(id, { limit: 100 });
         if (!cancelled) {
-          setStorage(data.entries);
-          setStorageCursor(data.cursor);
-          setStorageHasMore(data.has_more);
-          setCurrentLedger(data.current_ledger);
+          setStorage(data.storage);
+          setStorageCursor(data.next_cursor || null);
+          setStorageHasMore(Boolean(data.next_cursor));
         }
       } catch {
         // non-critical
@@ -230,8 +258,8 @@ function ContractDetailContent({ id }: { id: string }) {
         in_successful_call: showFailedOnly ? false : undefined,
       });
       setEvents((prev) => [...prev, ...data.events]);
-      setEventsCursor(data.cursor);
-      setEventsHasMore(data.has_more);
+      setEventsCursor(data.next_cursor || null);
+      setEventsHasMore(Boolean(data.next_cursor));
     } catch {
       // non-critical
     }
@@ -244,9 +272,9 @@ function ContractDetailContent({ id }: { id: string }) {
         cursor: storageCursor,
         limit: 100,
       });
-      setStorage((prev) => [...prev, ...data.entries]);
-      setStorageCursor(data.cursor);
-      setStorageHasMore(data.has_more);
+      setStorage((prev) => [...prev, ...data.storage]);
+      setStorageCursor(data.next_cursor || null);
+      setStorageHasMore(Boolean(data.next_cursor));
     } catch {
       // non-critical
     }
@@ -257,7 +285,8 @@ function ContractDetailContent({ id }: { id: string }) {
       setTagSaving(true);
       setTagError(null);
       try {
-        const res = await addContractTag(id, tag, getUserId());
+        const session = await ensureSession();
+        const res = await addContractTag(id, tag, session.user_id);
         setTags(res.tags ?? []);
       } catch (err) {
         setTagError(
@@ -277,7 +306,8 @@ function ContractDetailContent({ id }: { id: string }) {
       setTagSaving(true);
       setTagError(null);
       try {
-        await removeContractTag(id, tag, getUserId());
+        const session = await ensureSession();
+        await removeContractTag(id, tag, session.user_id);
         setTags((prev) => prev.filter((t) => t !== tag));
       } catch (err) {
         setTagError(
@@ -333,9 +363,8 @@ function ContractDetailContent({ id }: { id: string }) {
     );
   }
 
-  const eventVolumeData = stats?.event_volume ?? [];
-  const invocationData = stats?.invocation_count ?? [];
-  const contractStats = stats?.stats;
+  const windowLabel =
+    window === "all" ? null : (stats?.window_duration ?? window);
 
   return (
     <div>
@@ -368,17 +397,14 @@ function ContractDetailContent({ id }: { id: string }) {
           <AddToGroup contractId={id} />
           <VerifiedBadge contractId={id} />
         </div>
-        {contract?.sync && (
-          <div className="mt-1 flex gap-4 text-xs text-[var(--color-text-secondary)]">
-            <span>Network: {contract.network}</span>
+        <div className="mt-1 flex gap-4 text-xs text-[var(--color-text-secondary)]">
+          <span>Network: {contract?.network}</span>
+          {stats && (
             <span>
-              Last ledger: {contract.sync.last_ledger.toLocaleString()}
+              Last synced ledger: {stats.last_synced_ledger.toLocaleString()}
             </span>
-            <span>
-              Last sync: {new Date(contract.sync.last_run_at).toLocaleString()}
-            </span>
-          </div>
-        )}
+          )}
+        </div>
         <div className="mt-3 max-w-lg">
           <TagInput
             tags={tags}
@@ -394,30 +420,31 @@ function ContractDetailContent({ id }: { id: string }) {
       <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Events"
-          value={contractStats?.total_events?.toLocaleString() ?? "-"}
-          subtext="Total indexed"
+          value={stats?.event_count?.toLocaleString() ?? "-"}
+          subtext={
+            stats && windowLabel
+              ? `${stats.window_event_count.toLocaleString()} in ${windowLabel}`
+              : "Total indexed"
+          }
         />
         <StatCard
           label="Invocations"
-          value={contractStats?.total_invocations?.toLocaleString() ?? "-"}
-          subtext="Total transactions"
+          value={stats?.invocation_count?.toLocaleString() ?? "-"}
+          subtext={
+            stats && windowLabel
+              ? `${stats.window_invocation_count.toLocaleString()} in ${windowLabel}`
+              : "Total transactions"
+          }
         />
         <StatCard
           label="Storage Entries"
-          value={contractStats?.storage_entry_count?.toLocaleString() ?? "-"}
+          value={stats?.storage_count?.toLocaleString() ?? "-"}
           subtext="Currently tracked"
         />
         <StatCard
-          label="Expiring Soon"
-          value={contractStats?.expiring_entry_count?.toLocaleString() ?? "-"}
-          subtext="Within 7 days"
-          variant={
-            (contractStats?.expiring_entry_count ?? 0) > 10
-              ? "danger"
-              : (contractStats?.expiring_entry_count ?? 0) > 0
-                ? "warning"
-                : "default"
-          }
+          label="Last Synced Ledger"
+          value={stats?.last_synced_ledger?.toLocaleString() ?? "-"}
+          subtext="Indexer progress"
         />
       </section>
 
@@ -426,7 +453,7 @@ function ContractDetailContent({ id }: { id: string }) {
           <h2 className="text-xl font-semibold">Activity</h2>
           <WindowSelector selected={window} onChange={setWindow} />
         </div>
-        {statsLoading ? (
+        {seriesLoading ? (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ChartSkeleton />
             <ChartSkeleton />
@@ -437,13 +464,13 @@ function ContractDetailContent({ id }: { id: string }) {
               <h3 className="mb-3 text-sm font-medium text-[var(--color-text-secondary)]">
                 Event Volume
               </h3>
-              <EventVolumeChart data={eventVolumeData} />
+              <EventVolumeChart data={eventSeries} />
             </div>
             <div className="rounded-lg bg-[var(--color-bg-card)] p-4">
               <h3 className="mb-3 text-sm font-medium text-[var(--color-text-secondary)]">
                 Invocations
               </h3>
-              <InvocationChart data={invocationData} />
+              <InvocationChart data={invocationSeries} />
             </div>
           </div>
         )}
@@ -500,7 +527,7 @@ function ContractDetailContent({ id }: { id: string }) {
         ) : (
           <StoragePanel
             entries={storage}
-            currentLedger={currentLedger}
+            currentLedger={stats?.last_synced_ledger ?? 0}
             onLoadMore={handleLoadMoreStorage}
             hasMore={storageHasMore}
           />
@@ -514,7 +541,10 @@ function ContractDetailContent({ id }: { id: string }) {
 
       <section className="mb-8">
         <h2 className="mb-4 text-xl font-semibold">Snapshot / replay</h2>
-        <SnapshotPanel contractId={id} currentLedger={currentLedger} />
+        <SnapshotPanel
+          contractId={id}
+          currentLedger={stats?.last_synced_ledger ?? 0}
+        />
       </section>
 
       <section className="mb-8">
